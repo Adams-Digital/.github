@@ -4,6 +4,8 @@
 
 ***Please do not report security vulnerabilities through public GitHub issues.***
 
+_Source_: <https://adamsdigital.com/security>
+
 _Last updated_: April 27, 2024
 
 Welcome to the Adams Digital Security Policy. As a leading hosting company, we prioritize the security of our networks, systems, and data, as well as the trust of our customers. We are committed to providing secure and reliable services and this policy outlines the measures we have put in place to protect our stakeholders.
