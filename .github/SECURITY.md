@@ -38,7 +38,27 @@ Adams Digital has a dedicated incident response team that is ready to act in cas
 
 ## Reporting a Vulnerability
 
-We encourage responsible disclosure of any potential security vulnerabilities. Please report suspected vulnerabilities to us at [security@adamsdigital.com](mailto:security@adamsdigital.com). We appreciate your help in keeping our services secure for everyone.
+We encourage responsible disclosure of any potential security vulnerabilities. For secure communication, we recommend using PGP encryption when sending sensitive information related to security vulnerabilities. Compatible email clients can automatically retrieve our public PGP key via the [Web Key Directory (WKD) protocol](https://wiki.gnupg.org/WKD), ensuring secure and confidential communication.
+
+Here’s how you can use PGP encryption:
+
+1. Ensure your email client supports automatic key retrieval via WKD, or configure your PGP tool to use WKD.
+2. Compose your message and use your PGP tool to encrypt and sign it for `security@adamsdigital.com`.
+3. Send the encrypted message to us at [security@adamsdigital.com](mailto:security@adamsdigital.com).
+
+For clients that do not support WKD, you may manually retrieve our public PGP key from:
+
+``` text
+https://openpgpkey.adamsdigital.com/.well-known/openpgpkey/adamsdigital.com/hu/t5s8ztdbon8yzntexy6oz5y48etqsnbb
+```
+
+After downloading the key, you can encrypt and sign your message using a command like:
+
+``` bash
+gpg --encrypt --sign --armor -r security@adamsdigital.com yourmessage.txt
+```
+
+Please report suspected vulnerabilities to us at [security@adamsdigital.com](mailto:security@adamsdigital.com). We appreciate your help in keeping our services secure for everyone.
 
 ## Updates to Our Security Policy
 
