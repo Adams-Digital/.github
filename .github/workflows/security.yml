@@ -1,0 +1,83 @@
+name: Security scan
+
+# Secrets + SAST gate for repos that have no other pull-request check.
+#
+# The check this produces is named `security` in EVERY repo it is rolled out
+# to, deliberately. A single stable context name is what lets the required-
+# status-check ruleset in Adams-Digital/GitHub-Org-Main require one string
+# org-wide instead of carrying a per-repo name for each repo.
+#
+# It must be proven green on real pull requests BEFORE it is added to that
+# ruleset. Requiring a check that has never reported blocks every PR in the
+# repo permanently.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Supersede rather than accumulate. Not cosmetic: the org's self-hosted
+# runners are a scale set on a two-node home Kubernetes cluster, and stacked
+# runs have previously driven a node's disk to saturation and taken the
+# cluster's LoadBalancer -- and therefore every site on it -- down with it.
+# This job runs on GitHub-hosted runners (see below) so it is not the same
+# blast radius, but the habit is worth keeping.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    # Explicit and identical everywhere: this string IS the check context.
+    name: security
+
+    # GitHub-hosted on purpose, NOT arc-runner-org. This workflow is going
+    # into ~27 repos at once; pointing that many new jobs at the single
+    # self-hosted runner backing the whole org is how the cluster incident
+    # above happened. Private-repo minutes are billed against the Team plan's
+    # included allowance, and this job is ~1-2 minutes.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Gitleaks (secrets)
+        env:
+          # The gitleaks CLI is MIT-licensed and free. The gitleaks-action@v2
+          # wrapper is NOT -- it requires a paid GITLEAKS_LICENSE for
+          # organization repos beyond a single repo, which is why the binary
+          # is fetched directly here rather than using the marketplace action.
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          # `dir` scans the working tree rather than rewritten history: this is
+          # a merge gate for what is about to land, and no repo here is going
+          # to rewrite history to clear an old finding.
+          # --redact keeps any match out of the build log.
+          ./gitleaks dir . --no-banner --redact --exit-code 1
+
+      - name: Semgrep (SAST)
+        env:
+          # Pinned. The OSS CLI with a registry ruleset needs no account and no
+          # SEMGREP_APP_TOKEN -- `semgrep ci` would want the managed service,
+          # `semgrep scan --config` does not.
+          SEMGREP_VERSION: 1.176.0
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --error \
+            --quiet \
+            --metrics=off \
+            --exclude='.terraform/**' \
+            --exclude='**/node_modules/**' \
+            --exclude='**/dist/**'
