@@ -1,0 +1,187 @@
+name: E2E redundancy gate
+
+# Reusable workflow. It answers one question about a push to the default branch:
+#
+#   Is the code this push put on main byte-for-byte the code whose end-to-end
+#   tests already passed on its pull request?
+#
+# When the answer is yes, the calling workflow skips its e2e jobs for this push.
+# Nothing else is skipped. The prod deploy lives in a separate workflow
+# (astro-deploy-prod.yml) that this gate never touches, so the live site still
+# updates.
+#
+# WHY. Every Dependabot merge on a site repo used to re-run the whole Playwright
+# suite on main, although the same suite had just gone green on the PR. Each
+# of those runs writes ~3.4 GB to a node disk on the in-cluster ARC runners. On
+# 2026-09-22/23, 94 of them plus rebases saturated the runners and the disk
+# load stalled etcd on the control-plane node.
+#
+# WHAT "SAME CODE" MEANS HERE, and why the Dependabot author alone is not
+# enough: on nickadams-resume-site, #35 was merged on a PR run that was 13 days
+# old, and main had moved since. The test that failed on main did not exist
+# when the PR ran, so skipping on "it was Dependabot" alone would have hidden a
+# real failure. The gate therefore proves freshness itself instead of trusting
+# the merging app to have checked it. It says "redundant" only if ALL of the
+# following hold, and anything it cannot read counts as "not redundant":
+#
+#   1. The push is to the default branch, by the Dependabot merge app
+#      (adams-digital-dependabot-watcher[bot]) or dependabot[bot], and it
+#      carries exactly one commit whose single parent is the previous tip
+#      (`before`). That describes a squash merge, and nothing else.
+#   2. That commit is the merge commit of a merged pull request into the
+#      default branch, and the PR's author is dependabot[bot].
+#   3. The PR head contains the previous tip of main (compare shows it is 0
+#      commits behind). This is the freshness check: the PR's run tested
+#      head merged into a base that main has not moved past since.
+#   4. The merge commit's tree is identical to the PR head's tree.
+#   5. The newest completed `pull_request` run of THE CALLING WORKFLOW on that
+#      exact PR head concluded success, and every job named in `jobs` ran in
+#      it and succeeded. A skipped job does not count.
+#
+# A human push, a non-Dependabot merge, a stale PR, or an API error all come
+# out "not redundant", and the caller runs its e2e jobs as before.
+#
+# HOW TO CALL IT (in the site repo's playwright.yml):
+#
+#   jobs:
+#     e2e-gate:
+#       if: >-
+#         github.event_name == 'push' &&
+#         contains(fromJSON('["adams-digital-dependabot-watcher[bot]","dependabot[bot]"]'), github.actor)
+#       uses: Adams-Digital/.github/.github/workflows/e2e-redundancy-gate.yml@main
+#       permissions:
+#         contents: read
+#         actions: read
+#         pull-requests: read
+#       with:
+#         jobs: test
+#
+#     test:
+#       needs: e2e-gate
+#       if: ${{ !cancelled() && needs.e2e-gate.outputs.redundant != 'true' }}
+#
+# The caller's `if:` keeps human pushes and every pull_request from starting a
+# runner for this at all; the gate re-checks the same conditions regardless.
+# `!cancelled()` is what lets the e2e jobs run when the gate is skipped (every
+# PR, every human push) or fails. Only an explicit "true" skips them.
+#
+# What the Dependabot pass reads: with the e2e jobs skipped and the gate green,
+# the calling workflow's run concludes `success`, which dependabot-watcher's
+# verify_main treats as green. It treats only failure, timed_out and
+# startup_failure as red, and `cancelled` as superseded.
+
+on:
+  workflow_call:
+    inputs:
+      jobs:
+        description: >-
+          Comma-separated names of the caller's e2e jobs, exactly as they appear
+          in the Checks list (the job's `name:`, or its id when it has none).
+          Each must have run and succeeded on the PR. A matrix job "test"
+          matches "test (…)".
+        type: string
+        required: true
+    outputs:
+      redundant:
+        description: '"true" when the e2e jobs can be skipped for this push; anything else means run them.'
+        value: ${{ jobs.gate.outputs.redundant }}
+
+jobs:
+  gate:
+    name: e2e redundancy gate
+    # arc-runner-org, because this job is a handful of API calls: no checkout,
+    # no container, no image pull, nothing on disk. It replaces a multi-GB e2e
+    # job on the same runners. A GitHub-hosted runner would bill a minute per
+    # Dependabot merge on the private site repos, and there are ~100 on a busy
+    # night.
+    runs-on: arc-runner-org
+    timeout-minutes: 5
+    # Job-level as well as step-level: if the runner dies under this job, the
+    # job must not turn the caller's run red. A caller job that `uses:` a
+    # reusable workflow cannot set continue-on-error itself, so it lives here.
+    continue-on-error: true
+    outputs:
+      redundant: ${{ steps.decide.outputs.redundant }}
+    steps:
+      - name: Decide whether this push's e2e run is redundant
+        id: decide
+        # Belt and braces: the script already turns every error into "not
+        # redundant", but a gate that goes red would turn main red for the
+        # Dependabot pass, which is worse than the e2e run it was avoiding.
+        continue-on-error: true
+        uses: actions/github-script@v9
+        env:
+          E2E_JOBS: ${{ inputs.jobs }}
+        with:
+          script: |
+            const MERGE_ACTORS = ["adams-digital-dependabot-watcher[bot]", "dependabot[bot]"];
+            const PR_AUTHOR = "dependabot[bot]";
+            const { owner, repo } = context.repo;
+            const main = context.payload.repository?.default_branch;
+            const sha = context.sha;
+            const wanted = (process.env.E2E_JOBS || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+            const decide = async (redundant, why) => {
+              core.setOutput("redundant", redundant ? "true" : "false");
+              const line = redundant ? `Skipping e2e: ${why}` : `Running e2e: ${why}`;
+              core.notice(line);
+              await core.summary.addHeading("E2E redundancy gate", 3).addRaw(line).addEOL().write();
+            };
+
+            try {
+              if (!wanted.length) return decide(false, "the caller named no e2e jobs to verify");
+              if (context.eventName !== "push" || context.ref !== `refs/heads/${main}`)
+                return decide(false, `event is ${context.eventName} on ${context.ref}, not a push to ${main}`);
+              if (!MERGE_ACTORS.includes(context.actor))
+                return decide(false, `pushed by ${context.actor}, not the Dependabot merge app`);
+              const commits = context.payload.commits || [];
+              if (commits.length !== 1) return decide(false, `the push carries ${commits.length} commits, not one squash merge`);
+
+              const { data: commit } = await github.rest.repos.getCommit({ owner, repo, ref: sha });
+              if (commit.parents.length !== 1) return decide(false, `${sha.slice(0, 7)} has ${commit.parents.length} parents, not a squash merge`);
+              const parent = commit.parents[0].sha;
+              if (parent !== context.payload.before)
+                return decide(false, `the push moved main from ${String(context.payload.before).slice(0, 7)}, not from the commit's parent ${parent.slice(0, 7)}`);
+
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
+              const pr = prs.find((p) => p.merge_commit_sha === sha && p.merged_at && p.base.ref === main);
+              if (!pr) return decide(false, `no merged pull request into ${main} has ${sha.slice(0, 7)} as its merge commit`);
+              if (pr.user?.login !== PR_AUTHOR) return decide(false, `#${pr.number} is by ${pr.user?.login}, not ${PR_AUTHOR}`);
+              const head = pr.head.sha;
+
+              // Freshness: the PR head must already contain the main it was merged into.
+              const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${parent}...${head}`, per_page: 1 });
+              if (cmp.behind_by !== 0)
+                return decide(false, `#${pr.number}'s head ${head.slice(0, 7)} was ${cmp.behind_by} commit(s) behind main when it merged, so its PR run tested older code`);
+
+              const { data: headCommit } = await github.rest.git.getCommit({ owner, repo, commit_sha: head });
+              if (headCommit.tree.sha !== commit.commit.tree.sha)
+                return decide(false, `the tree on main differs from #${pr.number}'s head tree`);
+
+              // The same workflow that called this gate, on that exact PR head.
+              const { data: self } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: context.runId });
+              const { data: list } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: self.workflow_id, head_sha: head, event: "pull_request", per_page: 50,
+              });
+              const done = list.workflow_runs
+                .filter((r) => r.status === "completed")
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              if (!done.length) return decide(false, `no completed pull_request run of ${self.name} on ${head.slice(0, 7)}`);
+              const prRun = done[0];
+              if (prRun.conclusion !== "success")
+                return decide(false, `the newest PR run on ${head.slice(0, 7)} concluded ${prRun.conclusion} (${prRun.html_url})`);
+
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: prRun.id, filter: "latest", per_page: 100,
+              });
+              for (const name of wanted) {
+                const matched = jobs.filter((j) => j.name === name || j.name.startsWith(`${name} (`));
+                if (!matched.length) return decide(false, `job "${name}" did not run in the PR run ${prRun.html_url}`);
+                const bad = matched.find((j) => j.conclusion !== "success");
+                if (bad) return decide(false, `job "${bad.name}" concluded ${bad.conclusion} in the PR run ${prRun.html_url}`);
+              }
+
+              return decide(true, `#${pr.number} (${head.slice(0, 7)}) was current with main, its tree is what landed, and ${wanted.join(", ")} passed on it in ${prRun.html_url}`);
+            } catch (err) {
+              return decide(false, `could not verify (${err.status ?? ""} ${err.message})`);
+            }
