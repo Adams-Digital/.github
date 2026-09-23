@@ -96,6 +96,10 @@ jobs:
     # night.
     runs-on: arc-runner-org
     timeout-minutes: 5
+    # Job-level as well as step-level: if the runner dies under this job, the
+    # job must not turn the caller's run red. A caller job that `uses:` a
+    # reusable workflow cannot set continue-on-error itself, so it lives here.
+    continue-on-error: true
     outputs:
       redundant: ${{ steps.decide.outputs.redundant }}
     steps:
