@@ -554,7 +554,7 @@ jobs:
 
       - name: Upload report
         if: always() && steps.summarise.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: code-security-report
           path: ${{ runner.temp }}/code-security/report.json
@@ -563,7 +563,7 @@ jobs:
 
       - name: Upload SARIF
         if: always() && steps.summarise.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opengrep-sarif
           path: ${{ runner.temp }}/code-security/opengrep-sanitised.sarif
